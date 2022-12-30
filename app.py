@@ -104,8 +104,8 @@ def ConnectNode(key):
 
 
 def GeneratePreauthKey(namespace=None, api=None, key=None, tags=[]):
-    headscale_path = "./binaries/headscale_0.17.0_linux_amd64"
-    #headscale_path = "headscale"
+    #headscale_path = "./binaries/headscale_0.17.0_linux_amd64"
+    headscale_path = "headscale"
     command = [headscale_path, "authkey", "create","-o", "json" , "-n", namespace]
 
     if tags:
