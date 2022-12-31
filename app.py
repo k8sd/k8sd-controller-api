@@ -90,7 +90,7 @@ def ConnectNode(key):
     tailscale_preauth_key = GeneratePreauthKey(namespace=cluster, tags=tags)
 
     with open("/data/k3s/server/agent-token", "r") as agent_token_file:
-        k3s_token = agent_token_file.read()
+        k3s_token = agent_token_file.read().strip()
 
 
     additional_tailscale_args = " ".join(additional_tailscale_args)
