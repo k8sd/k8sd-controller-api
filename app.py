@@ -2,6 +2,7 @@ import io
 import os
 from flask import Flask, request
 from flask import send_file, render_template, render_template_string
+from pathlib import Path
 import subprocess
 import logging
 import json
@@ -82,11 +83,9 @@ def ConnectNode(key):
     # --advertise-routes
 
     # For now there are some defaults:
-    controller_domain = os.environ.get("K8SD_CONTROLLER_DOMAIN")
-    if not controller_domain:
-        logging.error("Need to provide a K8SD_CONTROLLER_DOMAIN environment variable")
+    controller_domain = GetControllerDomain()
 
-    controller_private_ip = "100.64.0.1"
+    controller_private_ip = GetControllerIP()
     tailscale_preauth_key = GeneratePreauthKey(namespace=cluster, tags=tags)
 
     with open("/data/k3s/server/agent-token", "r") as agent_token_file:
@@ -153,23 +152,34 @@ def get_headscale_binary(architecture, version="0.17.0"):
 def get_headscale_config(key):
     return render_template('headscale_config.yaml', name=key)
 
-@app.route('/config/kubernetes/<key>/<one_time>')
+@app.route('/config/kubernetes/<key>')
 def get_kubernetes_config(key):
     '''Returns the local kubectl configuration.
        Expected to be run after initializing the cluster with a 1-time code.
     '''
-    command = ["k3s", "authkey", "create","-o", "json" , "-n", namespace]
+    if not AuthenticateOneTimeConfigKey(key):
+        return {"error": "unauthenticated"}
 
-    logging.warning("Using remote headscale %s" % api)
-    env = {}
-
-    logging.warn(" ".join(command))
-    logging.warn("env: %s" % env)
-    try:
-        key_command = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=True, env=env)
-    except Exception as e:
-        raise(e)
-
-    kubectl_file = ""
+    controller_private_address = "%s:6443" % GetControllerIP()
+    with open("/etc/rancher/k3s/k3s.yaml", "r") as ctl_file:
+        kubectl_file = ctl_file.read()
+    kubectl_file.replace(controller_private_address, "%s:6445" % GetControllerDomain())
     return kubectl_file
 
+def GetControllerDomain():
+    # For now there are some defaults:
+    controller_domain = os.environ.get("K8SD_CONTROLLER_DOMAIN")
+    if not controller_domain:
+        logging.error("Need to provide a K8SD_CONTROLLER_DOMAIN environment variable")
+    return controller_domain
+
+def GetControllerIP():
+    return "100.64.0.1"
+
+def AuthenticateOneTimeConfigKey(key):
+    '''Returns true if this is the first call to fetch the config file.'''
+    if os.path.exists("configuration_accessed"):
+        return False
+    else:
+        Path("configuration_accessed").touch()
+        return True
