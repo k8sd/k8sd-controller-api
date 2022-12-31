@@ -3,11 +3,22 @@ import os
 from flask import Flask, request
 from flask import send_file, render_template, render_template_string
 from pathlib import Path
+import string
 import subprocess
+import random
 import logging
 import json
 
 app = Flask(__name__)
+CONFIG = {
+    "whitelisting_enabled": False,
+    "whitelist_ip_cidrs": [],
+    "cluster": "k8s",
+    "controller_ip": "100.64.0.1",
+    "admin_api_key": ''.join(random.SystemRandom().choice(string.ascii_uppercase + string.digits) for _ in range(25)),
+    "api_key": ''.join(random.SystemRandom().choice(string.ascii_uppercase + string.digits) for _ in range(25)),
+}
+
 
 
 ## Controller -
@@ -27,7 +38,6 @@ def CreateCluster(domain, public_key=None, managed_credentials=False):
     return render_template('master-launch.sh',
       controller_domain=domain)
 
-
 @app.route('/connect/interactive/<cluster>')
 def InteractiveConnectNode(cluster):
     ''' Starts up a new node and allows them to not provide arguments.
@@ -43,12 +53,12 @@ def ConnectNode(key):
         There is another endpoint that is interactive, or allows the admin to configure via controller UI.
     '''
     
-    #TODO: Verify key
-    if key and key != "a":
+    if not ValidKey(key, admin=False):
         raise Exception("Bad authorization")
 
+    config = GetConfig()
     # Currently static, used in the TN namespace.
-    cluster = "k8s"
+    cluster = config["cluster"]
 
     # Use headscale to generate a pre-auth key for this node. Make it 1 time use, and set tags.
     # Currently default tags, everything is "worker".
@@ -85,7 +95,7 @@ def ConnectNode(key):
     # For now there are some defaults:
     controller_domain = GetControllerDomain()
 
-    controller_private_ip = GetControllerIP()
+    controller_private_ip = config["controller_ip"]
     tailscale_preauth_key = GeneratePreauthKey(namespace=cluster, tags=tags)
 
     with open("/data/k3s/server/agent-token", "r") as agent_token_file:
@@ -99,8 +109,106 @@ def ConnectNode(key):
       controller_private_ip=controller_private_ip,
       tailscale_preauth_key=tailscale_preauth_key,
       k3s_install_token=k3s_token,
-      tailscale_args=additional_tailscale_args)
+      tailscale_args=additional_tailscale_args,
+      whitelisted_ips=config["whitelist_ip_cidrs"],
+      ip_whitelisting=config["whitelisting_enabled"]
+      )
 
+@app.route('/applications/headscale/<architecture>')
+def get_headscale_binary(architecture, version="0.17.0"):
+    #filename = 'uploads\\123.jpg'
+    with open("binaries/headscale_%s_linux_%s" % (version, architecture), "rb") as f:
+        return send_file(io.BytesIO(f.read()), mimetype='application/octet-stream')
+
+@app.route('/config/headscale/<key>')
+def get_headscale_config(key):
+    return render_template('headscale_config.yaml', name=key)
+
+@app.route('/config/kubernetes/<key>')
+def get_kubernetes_config(key):
+    '''Returns the local kubectl configuration.
+       Expected to be run after initializing the cluster with a 1-time code.
+    '''
+    if not AuthenticateOneTimeConfigKey(key):
+        return {"error": "unauthenticated"}
+    config = GetConfig()
+    controller_private_address = "%s:6443" % config["controller_ip"]
+    with open("/etc/rancher/k3s/k3s.yaml", "r") as ctl_file:
+        kubectl_file = ctl_file.read()
+    return kubectl_file.replace(controller_private_address, "%s:6445" % GetControllerDomain())
+
+@app.route('/config/ipwhitelist/<option>/<key>', methods=["POST"])
+def set_ip_whitelisting(option, key):
+    if not ValidKey(key):
+        return {"error": "unauthorized"}
+    enable_options = ["enable", "on", "enabled"]
+    disable_options = ["disable", "disabled", "off"]
+    if option in enable_options:
+        wl_enabled = True
+    elif option in disable_options:
+        wl_enabled = False
+    else:
+        return {"error": "malformed request, options are: %s" % ", ".join(enable_options + disable_options)}
+    config = GetConfig()
+    config["whitelisting_enabled"] = wl_enabled
+    SaveConfig()
+    return {"whitelisting_enabled": wl_enabled}
+
+@app.route('/config/ipwhitelist/modify/<key>', methods=["POST"])
+def modify_ingress_whitelist(key):
+    if not ValidKey(key):
+        return {"error": "unauthorized"}
+    change_options = ["add", "remove", "replace"]
+    print(request)
+    params = request.get_json(force=True)
+    print(params)
+    if "ip" in params:
+        entries = [params["ip"]]
+    else:
+        entries = params["ips"]
+    if params["change"] not in change_options:
+        return {"error": "malformed request, change options are: %s" % ", ".join(change_options)}
+    
+    config = GetConfig()
+    ip_set = set(config["whitelist_ip_cidrs"])
+    if params["change"] == "add":
+        for ip in entries:
+            if "/" not in ip:
+                ip = "%s/32" % ip
+            ip_set.add(ip)
+    elif params["change"] == "remove":
+        for ip in entries:
+            if "/" not in ip:
+                ip = "%s/32" % ip
+            ip_set.remove(ip)
+
+    elif params["change"] == "replace":
+        ip_set = set()
+        for ip in entries:
+            if "/" not in ip:
+                ip = "%s/32" % ip
+            ip_set.add(ip)
+    config["whitelist_ip_cidrs"] = list(ip_set)
+    SaveConfig()
+    response = {
+        "status": "success",
+        "ip_list": config["whitelist_ip_cidrs"],
+    }
+    if not config["whitelisting_enabled"] and config["whitelist_ip_cidrs"]:
+        response["warning"] = "Whitelisting is disabled but there is a whitelist."
+    return response
+
+def GetControllerDomain():
+    # For now there are some defaults:
+    controller_domain = os.environ.get("K8SD_CONTROLLER_DOMAIN")
+    if not controller_domain:
+        logging.error("Need to provide a K8SD_CONTROLLER_DOMAIN environment variable")
+        config = GetConfig()
+        if "controller" not in config or not config["controller"]:
+            logging.error("No controller defined in environment or controller-config.json")
+            raise Exception("No controller provided")
+    SaveConfig()
+    return controller_domain
 
 def GeneratePreauthKey(namespace=None, api=None, key=None, tags=[]):
     #headscale_path = "./binaries/headscale_0.17.0_linux_amd64"
@@ -140,42 +248,6 @@ def GeneratePreauthKey(namespace=None, api=None, key=None, tags=[]):
     
     return result["key"]
 
-
-@app.route('/applications/headscale/<architecture>')
-def get_headscale_binary(architecture, version="0.17.0"):
-    #filename = 'uploads\\123.jpg'
-    with open("binaries/headscale_%s_linux_%s" % (version, architecture), "rb") as f:
-        return send_file(io.BytesIO(f.read()), mimetype='application/octet-stream')
-
-
-@app.route('/config/headscale/<key>')
-def get_headscale_config(key):
-    return render_template('headscale_config.yaml', name=key)
-
-@app.route('/config/kubernetes/<key>')
-def get_kubernetes_config(key):
-    '''Returns the local kubectl configuration.
-       Expected to be run after initializing the cluster with a 1-time code.
-    '''
-    if not AuthenticateOneTimeConfigKey(key):
-        return {"error": "unauthenticated"}
-
-    controller_private_address = "%s:6443" % GetControllerIP()
-    with open("/etc/rancher/k3s/k3s.yaml", "r") as ctl_file:
-        kubectl_file = ctl_file.read()
-    kubectl_file.replace(controller_private_address, "%s:6445" % GetControllerDomain())
-    return kubectl_file
-
-def GetControllerDomain():
-    # For now there are some defaults:
-    controller_domain = os.environ.get("K8SD_CONTROLLER_DOMAIN")
-    if not controller_domain:
-        logging.error("Need to provide a K8SD_CONTROLLER_DOMAIN environment variable")
-    return controller_domain
-
-def GetControllerIP():
-    return "100.64.0.1"
-
 def AuthenticateOneTimeConfigKey(key):
     '''Returns true if this is the first call to fetch the config file.'''
     if os.path.exists("configuration_accessed"):
@@ -183,3 +255,29 @@ def AuthenticateOneTimeConfigKey(key):
     else:
         Path("configuration_accessed").touch()
         return True
+
+def ValidKey(key, admin=True):
+    '''Validates the authentication key passed in to request URLs.'''
+    config = GetConfig()
+    if admin and key == config["admin_api_key"]:
+        return True
+    elif not admin and key == config["api_key"]:
+        return True
+    else:
+        return False
+
+def GetConfig():
+    global CONFIG
+    try:
+        with open("controller-config.json", "r") as config_file:
+            CONFIG = json.load(config_file)
+        return CONFIG
+    except:
+        # There's on existing config, populate it and return, or fail it out.
+        GetControllerDomain()
+        return CONFIG
+
+def SaveConfig():
+    global CONFIG
+    with open("controller-config.json", "w") as config_file:
+        json.dump(CONFIG, config_file)
