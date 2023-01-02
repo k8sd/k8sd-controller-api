@@ -50,7 +50,7 @@ def ClaimCluster(key):
     config = GetConfig()
     return {
         "admin_api_key": config["admin_api_key"],
-        "node_join_url": "https://%s/connect/worker/%s"
+        "node_join_url": "https://%s/cluster/connect/worker/%s"
         % (GetControllerDomain(), config["api_key"]),
         "kubeconfig": GetInitialKubeconfig(),
     }
@@ -172,7 +172,7 @@ def get_kubernetes_config(key, override_permissions=False):
 
 @app.route("/config/ipwhitelist/<option>/<key>", methods=["POST"])
 def set_ip_whitelisting(option, key):
-    if not ValidKey(key):
+    if not ValidKey(key, admin=True):
         return {"error": "unauthorized"}
     enable_options = ["enable", "on", "enabled"]
     disable_options = ["disable", "disabled", "off"]
@@ -193,7 +193,7 @@ def set_ip_whitelisting(option, key):
 
 @app.route("/config/ipwhitelist/modify/<key>", methods=["POST"])
 def modify_ingress_whitelist(key):
-    if not ValidKey(key):
+    if not ValidKey(key, admin=True):
         return {"error": "unauthorized"}
     change_options = ["add", "remove", "replace"]
     print(request)
@@ -240,7 +240,7 @@ def modify_ingress_whitelist(key):
 
 
 def GetInitialKubeconfig():
-    return get_kubernetes_config(override_permissions=True)
+    return get_kubernetes_config("", override_permissions=True)
 
 
 def GetControllerDomain():
