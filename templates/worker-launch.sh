@@ -91,5 +91,32 @@ echo "
 {% endfor %}
 " > /etc/haproxy/ip-whitelist.txt
 
-service haproxy restart
+service haproxy reload || service haproxy restart
 
+#Setup systemd based checkin
+echo "[Unit]
+Description=Connects and updates configuration for k8sd worker nodes
+Wants=k8sd-worker.timer
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c 'curl -sfL curl https://{{ controller_domain }}/cluster/connect/worker/{{ worker_key }} | sh'
+
+[Install]
+WantedBy=multi-user.target
+" > /etc/systemd/system/k8sd-worker.service
+
+echo "[Unit]
+Description=k8sd worker checkin job
+Requires=k8sd-worker.service
+
+[Timer]
+Unit=k8sd-worker.service
+OnCalendar=*-*-* *:1/5:00
+
+[Install]
+WantedBy=timers.target
+" > /etc/systemd/system/k8sd-worker.timer
+
+systemctl start k8sd-worker.timer
+systemctl enable k8sd-worker.timer
