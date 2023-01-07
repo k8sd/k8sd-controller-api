@@ -138,6 +138,7 @@ def ConnectNode(key):
         tailscale_args=additional_tailscale_args,
         whitelisted_ips=config["whitelist_ip_cidrs"],
         ip_whitelisting=config["whitelisting_enabled"],
+        worker_key=key
     )
 
 
