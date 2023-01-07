@@ -113,6 +113,7 @@ Requires=k8sd-worker.service
 [Timer]
 Unit=k8sd-worker.service
 OnCalendar=*-*-* *:1/5:00
+RandomizedDelaySec=230
 
 [Install]
 WantedBy=timers.target
